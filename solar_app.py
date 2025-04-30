@@ -2,90 +2,94 @@ import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
-from datetime import datetime
-from collections import defaultdict
+from selenium.webdriver.chrome.options import Options
 import time
+from collections import defaultdict
 import pandas as pd
 
-st.set_page_config(page_title="Mover rutetæller", layout="centered")
+# Streamlit UI
+st.set_page_config(page_title="Tæl ture via Mover Admin", layout="centered")
+st.title("📦 Mover rutetæller (manuelt via browser)")
+st.markdown("Denne app tæller antal ture pr. køretøj og adresse direkte fra Mover Admin.")
 
-st.title("📦 Mover Admin – dagligt rutetjek")
+# Inputfelter
+dato = st.date_input("Vælg dato")
+kunde_id = st.text_input("Indtast kunde ID (fx 6016)", value="6016")
 
-# 📅 Dato
-valgt_dato = st.date_input("Vælg dato", datetime.today())
-dato_str = valgt_dato.strftime("%d-%m-%Y")
+# Generer link baseret på input
+valgt_dato_str = dato.strftime("%Y-%m-%d")
+base_url = f"https://admin.mover.dk/dk/da/user-area/users/{kunde_id}/trips/"
 
-# Adresser og køretøjer
-adresser = ["Vingelodden 10", "Oliefabriksvej 49"]
-køretøjer = ["Cykel", "Bil", "Varevogn", "Liftvogn"]
-resultat = {adr: defaultdict(int) for adr in adresser}
+st.markdown(f"🔗 [Åbn Mover Admin for {valgt_dato_str}]( {base_url} )")
 
-# 🔘 Knap
-if st.button("Hent data"):
-    st.info("Åbner Mover Admin – log ind i browseren")
-    
-    service = Service("chromedriver.exe")
-    driver = webdriver.Chrome(service=service)
+# Startknap
+if st.button("🚀 Start rutetælling (side 1-3)"):
+    try:
+        with st.spinner("Starter browser og henter data..."):
 
-    driver.get("https://admin.mover.dk/")
-    time.sleep(15)  # tid til login manuelt
+            # Chrome setup
+            options = Options()
+            options.add_experimental_option("detach", True)
+            service = Service("chromedriver.exe")
+            driver = webdriver.Chrome(service=service, options=options)
 
-    for side in range(1, 4):
-        url = (
-            "https://admin.mover.dk/dk/da/user-area/users/6016/trips/"
-            if side == 1
-            else f"https://admin.mover.dk/dk/da/user-area/users/6016/trips/{side}"
-        )
+            # Gå til første side
+            driver.get(base_url)
+            st.info("🔐 Log ind i browseren hvis nødvendigt. Venter 20 sekunder...")
+            time.sleep(20)
 
-        driver.get(url)
-        time.sleep(2)
-        rows = driver.find_elements(By.CSS_SELECTOR, "tbody tr")
-        if not rows:
-            break
+            all_data = []
 
-        for row in rows:
-            try:
-                kolonner = row.find_elements(By.TAG_NAME, "td")
-                dato_tekst = kolonner[1].text.strip()
-                afhentning = kolonner[6].text.strip()
-                køretøj = kolonner[9].text.strip()
+            for page in range(1, 4):
+                st.write(f"⏳ Henter data fra side {page}...")
+                if page > 1:
+                    driver.get(base_url + str(page))
+                    time.sleep(2)
 
-                if dato_tekst != dato_str:
-                    continue
+                rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
 
-                if afhentning in adresser and køretøj in køretøjer:
-                    resultat[afhentning][køretøj] += 1
-            except:
-                continue
+                for row in rows:
+                    cols = row.find_elements(By.TAG_NAME, "td")
+                    if len(cols) < 10:
+                        continue
 
-    driver.quit()
-    st.success("✅ Data hentet!")
+                    row_date = cols[1].text.strip()
+                    pickup_address = cols[5].text.strip()
+                    vehicle = cols[8].text.strip()
 
-    # Formatér som DataFrame
-    data = []
-    for adr in adresser:
-        for kør in køretøjer:
-            data.append({
-                "Adresse": adr,
-                "Køretøj": kør,
-                "Antal ture": resultat[adr][kør]
-            })
-    df = pd.DataFrame(data)
+                    if row_date == valgt_dato_str:
+                        all_data.append((pickup_address, vehicle))
 
-    st.dataframe(df)
+            driver.quit()
 
-    # 📥 Download som Excel
-    def to_excel(df):
-        from io import BytesIO
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name="Ture")
-        return output.getvalue()
+            # Tæl
+            counts = defaultdict(lambda: defaultdict(int))
+            for address, vehicle in all_data:
+                if address in ["Vingelodden 10", "Oliefabriksvej 49"]:
+                    counts[address][vehicle] += 1
 
-    excel_data = to_excel(df)
-    st.download_button(
-        label="📥 Download som Excel",
-        data=excel_data,
-        file_name=f"ture_{dato_str}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+            result_rows = []
+            for address, vehicles in counts.items():
+                for vehicle_type, count in vehicles.items():
+                    result_rows.append({
+                        "Pickup address": address,
+                        "Vehicle": vehicle_type,
+                        "Antal ture": count
+                    })
+
+            if result_rows:
+                df = pd.DataFrame(result_rows)
+                st.success("✅ Rutetælling færdig!")
+                st.dataframe(df)
+
+                st.download_button(
+                    label="📥 Download som Excel",
+                    data=df.to_csv(index=False).encode("utf-8"),
+                    file_name="manual_rutetælling.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.warning("Ingen ture fundet på den valgte dato for de nævnte adresser.")
+
+    except Exception as e:
+        st.error(f"🚨 Fejl: {e}")
